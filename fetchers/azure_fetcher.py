@@ -545,6 +545,114 @@ def fetch_azure():
                 "metric_samples": metric_samples,
             }
 
+        def fetch_raw_logs():
+            now = datetime.now(timezone.utc)
+            start = now - timedelta(hours=24)
+            activity_filter = (
+                f"eventTimestamp ge '{start.isoformat()}' "
+                f"and eventTimestamp le '{now.isoformat()}'"
+            )
+            workspaces = graph_query(
+                """
+                Resources
+                | where type =~ 'microsoft.operationalinsights/workspaces'
+                | project id, name, resourceGroup, location, customerId=properties.customerId
+                | order by name asc
+                """,
+                limit=50,
+            )
+
+            raw_logs = {
+                "collection_window": {
+                    "start": start.isoformat(),
+                    "end": now.isoformat(),
+                },
+                "activity_log_events": _safe_value(
+                    [],
+                    lambda: _take(
+                        monitor_client.activity_logs.list(
+                            filter=activity_filter,
+                            select=(
+                                "eventTimestamp,resourceGroupName,resourceId,"
+                                "operationName,status,level,caller,category,"
+                                "claims,correlationId,description,eventName,"
+                                "httpRequest,properties,submissionTimestamp,"
+                                "subStatus,subscriptionId,tenantId"
+                            ),
+                        ),
+                        limit=200,
+                    ),
+                ),
+                "log_analytics_workspaces": workspaces,
+                "log_analytics_query_samples": [],
+                "notes": [
+                    "Activity Logs are management-plane events available through Azure Monitor.",
+                    "Log Analytics queries are best-effort and require workspace-level data access such as Monitoring Reader, Log Analytics Reader, or Log Analytics Data Reader.",
+                ],
+            }
+
+            token = _safe_value(
+                {},
+                lambda: creds.get_token("https://api.loganalytics.io/.default").token,
+            )
+            if isinstance(token, dict):
+                raw_logs["log_analytics_error"] = token.get("error", str(token))
+                return raw_logs
+
+            import requests
+
+            headers = {
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/json",
+            }
+            queries = {
+                "security_events": (
+                    "SecurityEvent | sort by TimeGenerated desc | take 50"
+                ),
+                "azure_activity": (
+                    "AzureActivity | sort by TimeGenerated desc | take 50"
+                ),
+                "signin_logs": (
+                    "SigninLogs | sort by TimeGenerated desc | take 50"
+                ),
+                "resource_diagnostics": (
+                    "AzureDiagnostics | sort by TimeGenerated desc | take 50"
+                ),
+            }
+
+            for workspace in workspaces[:10]:
+                workspace_id = workspace.get("customerId")
+                if not workspace_id:
+                    continue
+
+                workspace_result = {
+                    "workspace": workspace,
+                    "queries": {},
+                }
+                for query_name, query in queries.items():
+                    try:
+                        response = requests.post(
+                            "https://api.loganalytics.io/v1/workspaces/"
+                            f"{workspace_id}/query",
+                            headers=headers,
+                            json={
+                                "query": query,
+                                "timespan": f"{start.isoformat()}/{now.isoformat()}",
+                            },
+                            timeout=20,
+                        )
+                        workspace_result["queries"][query_name] = response.json()
+                        if response.status_code >= 400:
+                            workspace_result["queries"][query_name]["status_code"] = (
+                                response.status_code
+                            )
+                    except Exception as e:
+                        workspace_result["queries"][query_name] = {"error": str(e)}
+
+                raw_logs["log_analytics_query_samples"].append(workspace_result)
+
+            return raw_logs
+
         def fetch_billing():
             now = datetime.now(timezone.utc)
             month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
@@ -592,6 +700,7 @@ def fetch_azure():
         _safe_section(results, errors, "policy_inventory", fetch_policy_inventory)
         _safe_section(results, errors, "security", fetch_security)
         _safe_section(results, errors, "monitoring", fetch_monitoring)
+        _safe_section(results, errors, "raw_logs", fetch_raw_logs)
         _safe_section(results, errors, "billing", fetch_billing)
 
         if errors:

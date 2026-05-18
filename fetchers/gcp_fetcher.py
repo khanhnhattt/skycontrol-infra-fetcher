@@ -312,6 +312,87 @@ def fetch_gcp():
                 "log_based_metrics": log_metrics,
             }
 
+        def fetch_raw_logs():
+            now = datetime.now(timezone.utc)
+            start = now - timedelta(hours=24)
+
+            def list_entries(log_filter, page_size=50):
+                response = session.post(
+                    "https://logging.googleapis.com/v2/entries:list",
+                    json={
+                        "resourceNames": [project_name],
+                        "filter": log_filter,
+                        "pageSize": page_size,
+                        "orderBy": "timestamp desc",
+                    },
+                    timeout=20,
+                )
+                response.raise_for_status()
+                return response.json().get("entries", [])
+
+            def list_entries_safe(log_filter, page_size=50):
+                try:
+                    return list_entries(log_filter, page_size=page_size)
+                except Exception as e:
+                    return {"error": str(e)}
+
+            timestamp_filter = (
+                f'timestamp >= "{start.isoformat()}" '
+                f'AND timestamp <= "{now.isoformat()}"'
+            )
+
+            audit_log_filter = (
+                f"{timestamp_filter} "
+                'AND logName:"cloudaudit.googleapis.com"'
+            )
+            admin_activity_filter = (
+                f"{timestamp_filter} "
+                'AND logName:"cloudaudit.googleapis.com%2Factivity"'
+            )
+            system_event_filter = (
+                f"{timestamp_filter} "
+                'AND logName:"cloudaudit.googleapis.com%2Fsystem_event"'
+            )
+            policy_denied_filter = (
+                f"{timestamp_filter} "
+                'AND logName:"cloudaudit.googleapis.com%2Fpolicy"'
+            )
+            data_access_filter = (
+                f"{timestamp_filter} "
+                'AND logName:"cloudaudit.googleapis.com%2Fdata_access"'
+            )
+            warning_error_filter = (
+                f"{timestamp_filter} "
+                'AND severity>=WARNING'
+            )
+
+            return {
+                "collection_window": {
+                    "start": start.isoformat(),
+                    "end": now.isoformat(),
+                },
+                "audit_log_entries": list_entries_safe(audit_log_filter, page_size=100),
+                "admin_activity_entries": list_entries_safe(
+                    admin_activity_filter, page_size=50
+                ),
+                "system_event_entries": list_entries_safe(
+                    system_event_filter, page_size=50
+                ),
+                "policy_denied_entries": list_entries_safe(
+                    policy_denied_filter, page_size=50
+                ),
+                "data_access_entries_best_effort": list_entries_safe(
+                    data_access_filter, page_size=50
+                ),
+                "warning_or_error_entries": list_entries_safe(
+                    warning_error_filter, page_size=50
+                ),
+                "notes": [
+                    "roles/logging.viewer can read Admin Activity, System Event, and Policy Denied logs.",
+                    "Data Access logs may require roles/logging.privateLogViewer, depending on bucket/view configuration.",
+                ],
+            }
+
         _safe_section(results, errors, "project_metadata", fetch_project_metadata)
         _safe_section(results, errors, "iam_policy", fetch_iam_policy)
         _safe_section(results, errors, "enabled_services", fetch_enabled_services)
@@ -323,6 +404,7 @@ def fetch_gcp():
         _safe_section(results, errors, "cloud_sql_inventory", fetch_cloud_sql_inventory)
         _safe_section(results, errors, "monitoring", fetch_monitoring)
         _safe_section(results, errors, "logging", fetch_logging)
+        _safe_section(results, errors, "raw_logs", fetch_raw_logs)
         _safe_section(results, errors, "billing", fetch_billing)
 
         if errors:

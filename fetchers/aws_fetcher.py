@@ -418,6 +418,61 @@ def fetch_aws():
                 ),
             }
 
+        def fetch_raw_logs():
+            cloudtrail = _client(session, "cloudtrail", region)
+            logs = _client(session, "logs", region)
+            now = datetime.now(timezone.utc)
+            start = now - timedelta(hours=24)
+            start_ms = int(start.timestamp() * 1000)
+            end_ms = int(now.timestamp() * 1000)
+
+            log_groups = _safe_call(
+                [],
+                lambda: _paginate(logs, "describe_log_groups", "logGroups", limit=25),
+            )
+            cloudwatch_log_events = []
+            for log_group in log_groups[:10]:
+                log_group_name = log_group.get("logGroupName")
+                if not log_group_name:
+                    continue
+
+                events = _safe_call(
+                    [],
+                    lambda log_group_name=log_group_name: logs.filter_log_events(
+                        logGroupName=log_group_name,
+                        startTime=start_ms,
+                        endTime=end_ms,
+                        limit=20,
+                    ).get("events", []),
+                )
+                cloudwatch_log_events.append(
+                    {
+                        "log_group_name": log_group_name,
+                        "events": events,
+                    }
+                )
+
+            return {
+                "collection_window": {
+                    "start": start.isoformat(),
+                    "end": now.isoformat(),
+                },
+                "cloudtrail_lookup_events": _safe_call(
+                    [],
+                    lambda: cloudtrail.lookup_events(
+                        StartTime=start,
+                        EndTime=now,
+                        MaxResults=50,
+                    ).get("Events", []),
+                ),
+                "cloudwatch_log_groups_sample": log_groups,
+                "cloudwatch_log_events_sample": cloudwatch_log_events,
+                "notes": [
+                    "CloudTrail LookupEvents returns recent management/Insights events, not historical S3-delivered trail files.",
+                    "CloudWatch Logs samples are limited to the first 10 visible log groups and 20 events per group for the last 24 hours.",
+                ],
+            }
+
         def fetch_database_and_compute_services():
             rds = _client(session, "rds", region)
             lambda_client = _client(session, "lambda", region)
@@ -502,6 +557,7 @@ def fetch_aws():
         _safe_section(results, errors, "iam_inventory", fetch_iam_inventory)
         _safe_section(results, errors, "monitoring", fetch_monitoring)
         _safe_section(results, errors, "audit_security", fetch_audit_security)
+        _safe_section(results, errors, "raw_logs", fetch_raw_logs)
         _safe_section(
             results,
             errors,
